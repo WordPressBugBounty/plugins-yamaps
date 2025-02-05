@@ -101,6 +101,11 @@ https://github.com/yhunter-ru/yamaps
 
 == Changelog ==
 
+= 0.6.30 =
+* Security improvements.
+* Code refactoring.
+* Fixed: Bugfix. 
+
 = 0.6.28 =
 * Fixed: Bugfix.
 
