@@ -1,4 +1,104 @@
 <?php
+
+/**
+ * Sanitize coordinates string (e.g., "55.7558, 37.6173")
+ * Only allows numbers, dots, commas, spaces, and minus signs
+ *
+ * @param string $coord Coordinate string
+ * @return string Sanitized coordinate string
+ */
+function yamaps_sanitize_coords( string $coord ): string {
+    // Remove all characters except numbers, dots, commas, spaces, and minus
+    $sanitized = preg_replace( '/[^0-9.,\s\-]/', '', $coord );
+    
+    // Additional validation: should match pattern like "55.7558, 37.6173"
+    if ( preg_match( '/^-?\d+\.?\d*\s*,\s*-?\d+\.?\d*$/', trim( $sanitized ) ) ) {
+        return trim( $sanitized );
+    }
+    
+    // Return default Moscow coordinates if invalid
+    return '55.7558, 37.6173';
+}
+
+/**
+ * Sanitize zoom level (integer 0-21)
+ *
+ * @param mixed $zoom Zoom value
+ * @return int Sanitized zoom level
+ */
+function yamaps_sanitize_zoom( $zoom ): int {
+    $zoom_int = intval( $zoom );
+    
+    // Yandex Maps zoom range is 0-21
+    if ( $zoom_int < 0 ) {
+        return 0;
+    }
+    if ( $zoom_int > 21 ) {
+        return 21;
+    }
+    
+    return $zoom_int;
+}
+
+/**
+ * Sanitize map type and return full Yandex type string
+ *
+ * @param string $type Map type
+ * @return string Sanitized map type (always with yandex# prefix)
+ */
+function yamaps_sanitize_map_type( string $type ): string {
+    // Map short names to full Yandex type names
+    $type_map = array(
+        'map'              => 'yandex#map',
+        'satellite'        => 'yandex#satellite',
+        'hybrid'           => 'yandex#hybrid',
+        'yandex#map'       => 'yandex#map',
+        'yandex#satellite' => 'yandex#satellite',
+        'yandex#hybrid'    => 'yandex#hybrid',
+    );
+    
+    $type = sanitize_text_field( $type );
+    
+    return isset( $type_map[ $type ] ) ? $type_map[ $type ] : 'yandex#map';
+}
+
+/**
+ * Sanitize controls string
+ *
+ * @param string $controls Controls string (semicolon-separated)
+ * @return string Sanitized controls for JS array
+ */
+function yamaps_sanitize_controls( string $controls ): string {
+    $allowed_controls = array(
+        'fullscreenControl',
+        'geolocationControl',
+        'routeEditor',
+        'rulerControl',
+        'searchControl',
+        'trafficControl',
+        'typeSelector',
+        'zoomControl',
+        'routeButtonControl',
+        'routePanelControl',
+        'smallMapDefaultSet',
+        'mediumMapDefaultSet',
+        'largeMapDefaultSet',
+        'default',
+    );
+    
+    $controls_array = array_map( 'trim', explode( ';', $controls ) );
+    $sanitized = array();
+    
+    foreach ( $controls_array as $control ) {
+        $control = sanitize_text_field( $control );
+        if ( in_array( $control, $allowed_controls, true ) ) {
+            $sanitized[] = '"' . esc_js( $control ) . '"';
+        }
+    }
+    
+    return implode( ', ', $sanitized );
+}
+
 // Placemark shortcode function
 function yaplacemark_func($atts) {
     $atts = shortcode_atts( array(
@@ -30,9 +130,12 @@ function yaplacemark_func($atts) {
         }
     }
     
+    // Sanitize coordinates to prevent XSS
+    $safe_coord = yamaps_sanitize_coords( $atts["coord"] );
+    
     $yaplacemark='
-        YaMapsWP.myMap'.$maps_count.'.places.placemark'.$yaplacemark_count.' = {icon: "'.esc_js($atts["icon"]).'", name: "'.esc_js($atts["name"]).'", color: "'.esc_js($atts["color"]).'", coord: "'.esc_js($atts["coord"]).'", url: "'.esc_url($atts["url"]).'",};
-        myMap'.$maps_count.'placemark'.$yaplacemark_count.' = new ymaps.Placemark(['.$atts["coord"].'], {
+        YaMapsWP.myMap'.$maps_count.'.places.placemark'.$yaplacemark_count.' = {icon: "'.esc_js($atts["icon"]).'", name: "'.esc_js($atts["name"]).'", color: "'.esc_js($atts["color"]).'", coord: "'.esc_js($safe_coord).'", url: "'.esc_url($atts["url"]).'",};
+        myMap'.$maps_count.'placemark'.$yaplacemark_count.' = new ymaps.Placemark(['.$safe_coord.'], {
                                 hintContent: "'.esc_js($yahint).'",
                                 iconContent: "'.esc_js($yacontent).'",
                             }, {';
@@ -78,6 +181,12 @@ function yamap_func($atts, $content) {
     $current_map_index = $maps_count;
     
     $placearr = '';
+    
+    // Clustering is disabled by default
+    // Works only when cluster="1" is explicitly specified in the shortcode
+    // The option in options.php only affects the checkbox in the editor when creating a map
+    $cluster_grid = isset($yamaps_defaults_front['cluster_grid_option']) ? $yamaps_defaults_front['cluster_grid_option'] : '64';
+    
     $atts = shortcode_atts( array(
         'center' => esc_js($yamaps_defaults_front['center_map_option']),
         'zoom' => esc_js($yamaps_defaults_front['zoom_map_option']),
@@ -87,14 +196,28 @@ function yamap_func($atts, $content) {
         'scrollzoom' => '1',
         'mobiledrag' => '1',
         'container' => '',
+        'cluster' => '0',           // Disabled by default, works only with cluster="1"
+        'clustergrid' => $cluster_grid,
     ), $atts );
 
     $yaplacemark_count = 0;
     $yacontrol_count = 0;
     $yamap_onpage = true;
 
-    $yamactrl = str_replace(';', '", "', esc_js($atts["controls"]));
-    if (trim($yamactrl) != "") $yamactrl = '"'.$yamactrl.'"';
+    // Sanitize content: only allow [yaplacemark ...] shortcodes, remove everything else
+    $safe_content = '';
+    if ( ! empty( $content ) ) {
+        // Match only [yaplacemark ...] shortcodes (self-closing or with closing tag)
+        if ( preg_match_all( '/\[yaplacemark\s+[^\]]*\](?:\[\/yaplacemark\])?/i', $content, $matches ) ) {
+            $safe_content = implode( '', $matches[0] );
+        }
+    }
+
+    // Sanitize all map parameters to prevent XSS
+    $safe_center = yamaps_sanitize_coords( $atts["center"] );
+    $safe_zoom = yamaps_sanitize_zoom( $atts["zoom"] );
+    $safe_type = yamaps_sanitize_map_type( $atts["type"] );
+    $safe_controls = yamaps_sanitize_controls( $atts["controls"] );
 
     if (($yamap_load_api)) {
         if (trim($yamaps_defaults_front['apikey_map_option'])<>"") {
@@ -118,15 +241,18 @@ function yamap_func($atts, $content) {
         $yamap='';
     }
     
-    $placemarkscode=str_replace("&nbsp;", "", strip_tags($content));
+    $placemarkscode = $safe_content;
 
-    $atts["container"]=trim($atts["container"]);
-    if ($atts["container"]<>"") {
-        $mapcontainter=esc_html($atts["container"]);
-        $mapcontainter=str_replace("#", "", $mapcontainter);
-    }
-    else {
-        $mapcontainter='yamap'.$current_map_index;
+    // Sanitize container ID - only allow alphanumeric, hyphens, underscores
+    $atts["container"] = trim( $atts["container"] );
+    if ( $atts["container"] !== "" ) {
+        $mapcontainter = preg_replace( '/[^a-zA-Z0-9_\-]/', '', $atts["container"] );
+        // Ensure ID doesn't start with a number (invalid HTML ID)
+        if ( preg_match( '/^[0-9]/', $mapcontainter ) ) {
+            $mapcontainter = 'yamap-' . $mapcontainter;
+        }
+    } else {
+        $mapcontainter = 'yamap' . $current_map_index;
     }    
     
     // Check if "Open big map" button is enabled
@@ -166,7 +292,7 @@ function yamap_func($atts, $content) {
                    }
                    
                     YMlisteners.myMap'.$current_map_index.' = {};
-                    YaMapsWP.myMap'.$current_map_index.' = {center: "'.esc_js($atts["center"]).'", zoom: "'.esc_js($atts["zoom"]).'", type: "'.esc_js($atts["type"]).'", controls: "'.esc_js($atts["controls"]).'", places: {}};
+                    YaMapsWP.myMap'.$current_map_index.' = {center: "'.esc_js($safe_center).'", zoom: '.$safe_zoom.', type: "'.esc_js($safe_type).'", controls: "'.esc_js($atts["controls"]).'", places: {}};
 
                     var yamapsonclick = function (url) {
                             location.href=url;
@@ -174,10 +300,10 @@ function yamap_func($atts, $content) {
 
                     function init () {
                         myMap'.$current_map_index.' = new ymaps.Map("'.$mapcontainter.'", {
-                                center: ['.sanitize_text_field($atts["center"]).'],
-                                zoom: '.sanitize_text_field($atts["zoom"]).',
-                                type: "'.sanitize_text_field($atts["type"]).'",
-                                controls: ['.sanitize_text_field($yamactrl).'] ,
+                                center: ['.$safe_center.'],
+                                zoom: '.$safe_zoom.',
+                                type: "'.$safe_type.'",
+                                controls: ['.$safe_controls.'] ,
                                 
                             },
                             {
@@ -189,7 +315,30 @@ function yamap_func($atts, $content) {
                             for ($i = 1; $i <= $yaplacemark_count; $i++) {
                                 $placearr.='.add(myMap'.$current_map_index.'placemark'.$i.')';
                             }
-                            $yamap.='myMap'.$current_map_index.'.geoObjects'.$placearr.';';
+                            
+                            // If clustering is enabled
+                            if ($atts["cluster"]=="1") {
+                                $yamap.='
+                                var yaClusterer'.$current_map_index.' = new ymaps.Clusterer({
+                                    clusterIconLayout: "default#pieChart",
+                                    clusterIconPieChartRadius: 25,
+                                    clusterIconPieChartCoreRadius: 15,
+                                    clusterIconPieChartStrokeWidth: 3,
+                                    hasBalloon: false,
+                                    gridSize: '.intval($atts["clustergrid"]).'
+                                });
+                                yaClusterer'.$current_map_index.'.add([';
+                                for ($i = 1; $i <= $yaplacemark_count; $i++) {
+                                    $yamap.='myMap'.$current_map_index.'placemark'.$i;
+                                    if ($i < $yaplacemark_count) $yamap.=',';
+                                }
+                                $yamap.=']);
+                                myMap'.$current_map_index.'.geoObjects.add(yaClusterer'.$current_map_index.');
+                                ';
+                            } else {
+                                $yamap.='myMap'.$current_map_index.'.geoObjects'.$placearr.';';
+                            }
+                            
                             if ($atts["scrollzoom"]=="0") $yamap.="myMap".$current_map_index.".behaviors.disable('scrollZoom');";
                             // If map has mobiledrag=0, disable map dragging for the following platforms
                             if ($atts["mobiledrag"]=="0") {

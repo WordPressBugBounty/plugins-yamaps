@@ -10,10 +10,16 @@ if (!isset($maps_count)) {
 $yamap_load_api = true;
 $apikey = '';
 
-// Get API key from options
+// Get API key from options (sanitized later in api.php)
 $yamaps_options = get_option('yamaps_options');
-if (!empty($yamaps_options['apikey_map_option'])) {
-    $apikey = '&apikey=' . esc_attr($yamaps_options['apikey_map_option']);
+if ( ! empty( $yamaps_options['apikey_map_option'] ) ) {
+    // Sanitize: only allow alphanumeric, hyphens, underscores
+    $raw_apikey = sanitize_text_field( $yamaps_options['apikey_map_option'] );
+    if ( preg_match( '/^[a-zA-Z0-9\-_]*$/', $raw_apikey ) ) {
+        $apikey = '&apikey=' . rawurlencode( $raw_apikey );
+    } else {
+        $apikey = '';
+    }
 } else {
     $apikey = '';
 }
@@ -33,6 +39,8 @@ $yamaps_defaults_front = array(
     'open_map_option'            => 'off',
     'apikey_map_option'          => '',
     'reset_maps_option'          => 'off',
+    'cluster_map_option'         => 'off',      // Кластеризация по умолчанию
+    'cluster_grid_option'        => '64',       // Размер ячейки кластеризации
 );
 
 $yamaps_defaults_front_bak = $yamaps_defaults_front;
